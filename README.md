@@ -1,6 +1,6 @@
-# provider-kit
+# Every LLM has its own SDK. One API for all of them.
 
-**One API for 42 LLM providers.** OpenAI, Anthropic, Ollama, OpenRouter, Google Gemini, Azure, AWS Bedrock, Cohere �?same interface, built-in retry and timeout.
+**Switch between OpenAI, Anthropic, Ollama, Google Gemini, and 38 more — without changing a line of code.** provider-kit wraps 42 LLM providers behind one consistent `chat()` interface, with built-in retry and timeout. �?same interface, built-in retry and timeout.
 
 ```bash
 npm install provider-kit
