@@ -141,4 +141,4 @@ const reply = await provider.chat('gpt-4', messages)
 
 ## Related
 
-- `@openchat/fairy-guardian` �?self-healing process cluster for AI model servers
+- `fairy-guardian` �?self-healing process cluster for AI model servers
