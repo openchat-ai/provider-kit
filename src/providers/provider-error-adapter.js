@@ -103,6 +103,59 @@ export function createCancelSignal() {
 }
 
 /**
+ * createMonitor — observability wrapper
+ *
+ * Wraps provider calls with latency tracking, error classification,
+ * and logging hooks. No external dependencies.
+ *
+ * Usage:
+ *   const monitor = createMonitor({ onCall: (record) => console.table(record) });
+ *   const provider = monitor.wrap(await createProvider('openai', key));
+ *   await provider.chat('gpt-4', messages);
+ *   // → onCall receives { provider, model, latency, ok, error, timestamp }
+ */
+export function createMonitor(opts = {}) {
+  const onCall = opts.onCall || (() => {});
+
+  function wrap(provider) {
+    const origChat = provider.chat.bind(provider);
+    const origStream = provider.chatStream?.bind(provider);
+
+    provider.chat = async (model, messages, options) => {
+      const start = Date.now();
+      try {
+        const result = await origChat(model, messages, options);
+        onCall({ provider: provider.name || 'unknown', model, latency: Date.now() - start, ok: true, tokens: result.usage?.total_tokens || 0, timestamp: Date.now() });
+        return result;
+      } catch (e) {
+        const ce = classifyError(e, provider.name);
+        onCall({ provider: provider.name || 'unknown', model, latency: Date.now() - start, ok: false, error: ce.type, message: ce.message, timestamp: Date.now() });
+        throw e;
+      }
+    };
+
+    if (origStream) {
+      provider.chatStream = async function* (model, messages, options) {
+        const start = Date.now();
+        try {
+          const stream = origStream(model, messages, options);
+          for await (const chunk of stream) yield chunk;
+          onCall({ provider: provider.name || 'unknown', model, latency: Date.now() - start, ok: true, timestamp: Date.now() });
+        } catch (e) {
+          const ce = classifyError(e, provider.name);
+          onCall({ provider: provider.name || 'unknown', model, latency: Date.now() - start, ok: false, error: ce.type, timestamp: Date.now() });
+          throw e;
+        }
+      };
+    }
+
+    return provider;
+  }
+
+  return { wrap };
+}
+
+/**
  * createRouter — model health probe + auto-routing
  *
  * Periodically checks each model's availability and latency.

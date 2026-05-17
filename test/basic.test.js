@@ -286,4 +286,20 @@ describe('@openchat/provider-kit', () => {
     assert.strictEqual(router.strategy, 'latency');
     router.stop();
   });
+
+  // — createMonitor — //
+  test('createMonitor wraps provider and tracks calls', async () => {
+    const { createMonitor, createProvider } = await import('../src/index.js');
+    const records = [];
+    const monitor = createMonitor({ onCall: (r) => records.push(r) });
+    const provider = await createProvider('openai', 'tk', { baseUrl: 'http://localhost:1' });
+    provider.name = 'openai';
+    const wrapped = monitor.wrap(provider);
+    assert.ok(typeof wrapped.chat === 'function');
+    // call will fail (no server), but monitor captures it
+    try { await wrapped.chat('gpt-4', [{ role: 'user', content: 'Hi' }]); } catch {}
+    assert.ok(records.length > 0);
+    assert.strictEqual(records[0].provider, 'openai');
+    assert.strictEqual(records[0].ok, false);
+  });
 });
