@@ -17,8 +17,10 @@ import { persistentConfig } from '../core/persistent-config.js';
 
 class ProviderRegistry {
   constructor() {
-    this.providers = new Map();      // id -> provider instance
-    this.models = new Map();         // providerId -> [modelIds]
+    this.providers = new Map();
+    this.models = new Map();
+    this._modelTimestamps = new Map();    // providerId -> last fetch timestamp
+    this._modelCacheTtl = 60000;          // 60s
     this.presets = PRESET_PROVIDERS;
   }
 
@@ -125,25 +127,30 @@ class ProviderRegistry {
     try {
       const models = await provider.fetchModels();
       this.models.set(providerId, models);
+      this._modelTimestamps.set(providerId, Date.now());
       return models;
     } catch (e) {
-      // 如果失败，返回本地模型列表
       return provider.getModels();
     }
   }
 
   /**
-   * 获取模型列表
+   * 获取模型列表（缓存 60 秒，过期自动刷新）
    */
-  getModels(providerId) {
-    // 优先使用缓存的模型列表
-    if (this.models.has(providerId)) {
-      return this.models.get(providerId);
+  async getModels(providerId) {
+    const cached = this.models.get(providerId);
+    const lastFetch = this._modelTimestamps.get(providerId) || 0;
+    const stale = Date.now() - lastFetch > this._modelCacheTtl;
+
+    if (cached && !stale) return cached;
+
+    // 尝试刷新，失败则返回缓存
+    if (this.getProvider(providerId)) {
+      const fresh = await this.refreshModels(providerId).catch(() => cached || []);
+      return fresh;
     }
 
-    // 从 provider 获取
-    const provider = this.getProvider(providerId);
-    return provider ? provider.getModels() : [];
+    return cached || [];
   }
 
   /**
