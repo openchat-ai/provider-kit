@@ -252,14 +252,38 @@ describe('@openchat/provider-kit', () => {
   });
 
   // — createRouter — //
-  test('createRouter throws on empty array', () => {
+  test('createRouter throws on empty probes', () => {
     assert.throws(() => createRouter([]), ProviderError);
-    assert.throws(() => createRouter(), ProviderError);
+    assert.throws(() => createRouter({ probes: [] }), ProviderError);
   });
 
-  test('createRouter returns chat function', () => {
-    const router = createRouter([{ provider: 'openai', model: 'gpt-4', apiKey: 'test' }]);
+  test('createRouter returns router with all methods', () => {
+    const router = createRouter({ probes: [{ provider: 'openai', model: 'gpt-4', apiKey: 'test' }], probeInterval: 0 });
     assert.ok(typeof router.chat === 'function');
-    assert.strictEqual(router.strategies.length, 1);
+    assert.ok(typeof router.checkNow === 'function');
+    assert.ok(typeof router.stop === 'function');
+    assert.ok(typeof router.results === 'function');
+    assert.strictEqual(router.probes.length, 1);
+  });
+
+  test('createRouter with latency strategy', () => {
+    const router = createRouter({
+      probes: [
+        { provider: 'openai', model: 'gpt-4', apiKey: 'test' },
+        { provider: 'anthropic', model: 'claude', apiKey: 'test2' },
+      ],
+      strategy: 'latency',
+      probeInterval: 0,
+    });
+    assert.strictEqual(router.strategy, 'latency');
+    assert.strictEqual(router.probes.length, 2);
+    router.stop();
+  });
+
+  test('createRouter with legacy array API', () => {
+    const router = createRouter([{ provider: 'openai', model: 'gpt-4', apiKey: 'test' }]);
+    assert.strictEqual(router.probes.length, 1);
+    assert.strictEqual(router.strategy, 'latency');
+    router.stop();
   });
 });

@@ -54,26 +54,35 @@ const provider = providerRegistry.getProvider('openai')
 const reply = await provider.chat('gpt-4o-mini', [{ role: 'user', content: 'Hi' }])
 ```
 
-### Model fallback (like OpenRouter auto-failover)
+### Model auto-routing (health probes + real-time switching)
 
-Try GPT-4 first. If it's rate-limited or times out, fall back to Claude, then Ollama.
+Periodically detects which models are available and routes to the best one. Changes take effect immediately — no restart needed.
 
 ```js
 import { createRouter } from 'provider-kit'
 
-const router = createRouter([
-  { provider: 'openai',   model: 'gpt-4',        apiKey: process.env.OPENAI_API_KEY },
-  { provider: 'openai',   model: 'gpt-4o-mini',  apiKey: process.env.OPENAI_API_KEY },
-  { provider: 'anthropic', model: 'claude-3-haiku', apiKey: process.env.ANTHROPIC_API_KEY },
-  { provider: 'ollama',   model: 'llama3.2',     baseUrl: 'http://localhost:11434' },
-])
+const router = createRouter({
+  probes: [
+    { provider: 'openai',   model: 'gpt-4',        apiKey: process.env.OPENAI_API_KEY },
+    { provider: 'openai',   model: 'gpt-4o-mini',  apiKey: process.env.OPENAI_API_KEY },
+    { provider: 'anthropic', model: 'claude-3-haiku', apiKey: process.env.ANTHROPIC_API_KEY },
+    { provider: 'ollama',   model: 'llama3.2',     baseUrl: 'http://localhost:11434' },
+  ],
+  strategy: 'latency',          // 'latency' | 'failover' | 'round-robin'
+  probeInterval: 30000,          // ping every 30s (0 = manual only)
+  onProbeResult: (results) => console.log(results),
+})
 
-const reply = await router.chat([{ role: 'user', content: 'Explain quantum computing' }])
-// Automatically tries gpt-4 → gpt-4o-mini → claude-haiku → llama3.2
+const reply = await router.chat([{ role: 'user', content: 'Hello' }])
+// → auto-routed to the healthiest model
+
+// Manual probe
+const status = await router.checkNow()
+// → [{ provider, model, ok, latency, error }]
+
+// Stop auto-probe
+router.stop()
 ```
-
-Router skips auth/bad_request/quota errors (those won't work on another model either).
-Only retries on rate_limit, timeout, server_error, and network errors.
 
 ### Streaming
 
