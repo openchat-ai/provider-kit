@@ -26,6 +26,8 @@
     "api"
   ],
   "license": "MIT",
+  "author": "openchat-ai (https://github.com/openchat-ai)",
+  "bugs": { "url": "https://github.com/openchat-ai/provider-kit/issues" },
   "engines": {
     "node": ">=18"
   },

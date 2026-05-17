@@ -199,3 +199,7 @@ console.log(classifyError(err, 'openai').type)  // → "rate_limit"
 ## Related
 
 - `fairy-guardian` — self-healing process cluster for AI model servers
+
+---
+
+**Author:** [openchat-ai](https://github.com/openchat-ai) — reach me via [GitHub Issues](https://github.com/openchat-ai/provider-kit/issues) or leave a star ⭐
