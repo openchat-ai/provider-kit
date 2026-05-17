@@ -10,7 +10,7 @@
  *   const reply = await provider.chat('gpt-4', [{ role: 'user', content: 'Hi' }]);
  */
 
-export { ProviderError, AbortError, withRetry, withTimeout, safeProviderCall, classifyError, createCancelSignal } from './providers/provider-error-adapter.js';
+export { ProviderError, AbortError, withRetry, withTimeout, safeProviderCall, classifyError, createCancelSignal, createRouter } from './providers/provider-error-adapter.js';
 export { ProviderManager, providerManager } from './providers/provider-manager.js';
 export { providerRegistry, createProvider, listPresetProviders, PRESET_PROVIDERS } from './providers/provider-registry.js';
 export { persistentConfig, createStore } from './core/persistent-config.js';

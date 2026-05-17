@@ -101,3 +101,45 @@ export function createCancelSignal() {
     cancel: (reason) => controller.abort(new AbortError(reason || 'Cancelled by user')),
   };
 }
+
+/**
+ * createRouter — model fallback router
+ *
+ * Tries models in order. If one fails (rate_limit/timeout/server_error),
+ * automatically falls back to the next.
+ *
+ * Usage:
+ *   const router = createRouter([
+ *     { provider: 'openai', model: 'gpt-4', apiKey: 'sk-...' },
+ *     { provider: 'openai', model: 'gpt-4o-mini', apiKey: 'sk-...' },
+ *     { provider: 'anthropic', model: 'claude-3-haiku', apiKey: 'sk-...' },
+ *   ]);
+ *   const reply = await router.chat([{ role: 'user', content: 'Hi' }]);
+ */
+export function createRouter(strategies) {
+  if (!Array.isArray(strategies) || strategies.length === 0) {
+    throw new ProviderError('createRouter requires a non-empty array of strategies', { type: 'bad_request' });
+  }
+
+  async function chat(messages) {
+    const errors = [];
+    for (const entry of strategies) {
+      try {
+        const { createProvider } = await import('./openai-compatible.js');
+        const provider = await createProvider(entry.provider, entry.apiKey, { baseUrl: entry.baseUrl });
+        return await safeProviderCall(
+          () => provider.chat(entry.model, messages),
+          { provider: entry.provider, retries: 1, timeout: 15000 }
+        );
+      } catch (e) {
+        const ce = classifyError(e, entry.provider);
+        if (ce.type === 'auth' || ce.type === 'bad_request' || ce.type === 'quota') throw ce;
+        errors.push({ provider: entry.provider, model: entry.model, error: ce.message });
+        continue;
+      }
+    }
+    throw new ProviderError(`All models failed: ${errors.map(e => `${e.provider}/${e.model}`).join(', ')}`, { type: 'server_error' });
+  }
+
+  return { chat, strategies };
+}

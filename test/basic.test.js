@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
 import {
-  ProviderError, AbortError, withRetry, withTimeout, safeProviderCall, classifyError, createCancelSignal,
+  ProviderError, AbortError, withRetry, withTimeout, safeProviderCall, classifyError, createCancelSignal, createRouter,
   ProviderManager, providerManager, providerRegistry, createProvider,
 } from '../src/index.js';
 
@@ -249,5 +249,17 @@ describe('@openchat/provider-kit', () => {
   test('429 errors are retryable by default', () => {
     const e = new ProviderError('too fast', { statusCode: 429 });
     assert.strictEqual(e.retryable, true);
+  });
+
+  // — createRouter — //
+  test('createRouter throws on empty array', () => {
+    assert.throws(() => createRouter([]), ProviderError);
+    assert.throws(() => createRouter(), ProviderError);
+  });
+
+  test('createRouter returns chat function', () => {
+    const router = createRouter([{ provider: 'openai', model: 'gpt-4', apiKey: 'test' }]);
+    assert.ok(typeof router.chat === 'function');
+    assert.strictEqual(router.strategies.length, 1);
   });
 });
