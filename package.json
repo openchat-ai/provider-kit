@@ -1,7 +1,6 @@
 {
   "name": "provider-kit",
-  "version": "1.2.2",
-  "description": "42 LLM provider unified API — one interface for OpenAI, Anthropic, Ollama, OpenRouter, and 38 more. Built-in retry, timeout, and error handling.",
+  "version": "1.3.0",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -13,28 +12,16 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "prepublishOnly": "npm test",
-    "version": "git add -A src/ CHANGELOG.md",
-    "postversion": "git push && git push --tags"
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "llm",
-    "openai",
-    "anthropic",
-    "ollama",
-    "provider",
-    "api"
+    "provider"
   ],
   "license": "MIT",
   "author": "openchat-ai (https://github.com/openchat-ai)",
-  "bugs": {
-    "url": "https://github.com/openchat-ai/provider-kit/issues"
-  },
-  "engines": {
-    "node": ">=18"
-  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/openchat-ai/openchat"
+    "url": "https://github.com/openchat-ai/provider-kit.git"
   }
 }

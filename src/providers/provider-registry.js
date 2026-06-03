@@ -13,7 +13,7 @@ import { GeminiAdapter, createGeminiProvider } from './gemini-adapter.js';
 import { AzureOpenAIAdapter, createAzureOpenAIProvider } from './azure-adapter.js';
 import { CohereAdapter, createCohereProvider } from './cohere-adapter.js';
 import { BedrockProxyAdapter, createBedrockProxyProvider } from './bedrock-adapter.js';
-import { persistentConfig } from '../core/persistent-config.js';
+import { persistentConfig, setKeyResolver, clearKeyResolver, hasKeyResolver, resolveApiKey } from '../core/persistent-config.js';
 
 class ProviderRegistry {
   constructor() {
@@ -36,6 +36,7 @@ class ProviderRegistry {
     // 从预设创建
     const preset = this.presets[providerId];
     if (preset) {
+      // 注意: getProvider 保持同步，resolver 兜底仅在 chat() 内（async）做
       const apiKey = persistentConfig.getApiKey(providerId);
 
       // 特殊处理: Anthropic 使用专用适配器
@@ -288,7 +289,12 @@ class ProviderRegistry {
 
     // 确保已连接
     if (!provider.connected && !provider.skipAuth) {
-      const apiKey = persistentConfig.getApiKey(pid);
+      let apiKey = persistentConfig.getApiKey(pid);
+      // resolver fallback
+      if (!apiKey && hasKeyResolver()) {
+        const r = await Promise.resolve(resolveApiKey(pid));
+        if (r?.key) apiKey = r.key;
+      }
       if (!apiKey) {
         throw new Error(`No API key for ${pid}. Run: connect ${pid}`);
       }
