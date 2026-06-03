@@ -1,7 +1,7 @@
 {
   "name": "provider-kit",
-  "version": "1.2.2",
-  "description": "42 LLM provider unified API â€” one interface for OpenAI, Anthropic, Ollama, OpenRouter, and 38 more. Built-in retry, timeout, and error handling.",
+  "version": "1.3.0",
+  "description": "42 LLM provider unified API â€?one interface for OpenAI, Anthropic, Ollama, OpenRouter, and 38 more. Built-in retry, timeout, and error handling.",
   "type": "module",
   "main": "./src/index.js",
   "exports": {

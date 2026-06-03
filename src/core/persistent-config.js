@@ -86,6 +86,9 @@ class PersistentConfig {
 
 export const persistentConfig = new PersistentConfig();
 
+// Re-export key resolver API（保持向后兼容，所有 export 仍在此文件可用）
+export { setKeyResolver, clearKeyResolver, hasKeyResolver, resolveApiKey } from './key-resolver.js';
+
 /**
  * createStore — DI 模式：自定义存储实现
  * 用于框架集成者（Next.js、Remix、Bridge 等）传入自己的持久化方案
