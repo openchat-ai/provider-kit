@@ -1,4 +1,5 @@
 import { ProviderError } from './provider-error-adapter.js';
+import { epcFromResponse } from './epc-codec.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -122,24 +123,38 @@ export class AnthropicAdapter {
   }
 
   /**
-   * 转换响应格式: Anthropic -> OpenAI
+   * 转换响应格式: Anthropic -> 统一格式
+   *
+   * Anthropic Messages API 的 content 是 blocks 数组，包含多种类型：
+   * - { type: 'text', text: '...' }               → content
+   * - { type: 'thinking', thinking: '...', signature: '...' } → reasoningContent
+   * - { type: 'redacted_thinking', data: '...', signature: '...' } → reasoningContent（加密）
+   * - { type: 'tool_use', ... }                   → toolCalls
+   *
+   * 参考: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
    */
   convertResponse(anthropicResponse) {
-    const content = anthropicResponse.content
-      .filter(c => c.type === 'text')
-      .map(c => c.text)
-      .join('');
+    const textParts = [];
+    const thinkParts = [];
+    const rawBlocks = anthropicResponse.content || [];
+
+    for (const block of rawBlocks) {
+      if (block.type === 'text') {
+        textParts.push(block.text);
+      } else if (block.type === 'thinking') {
+        if (block.thinking) thinkParts.push(block.thinking);
+      } else if (block.type === 'redacted_thinking') {
+        thinkParts.push('[redacted thinking]');
+      }
+    }
+
+    const content = textParts.join('');
+    const reasoningContent = thinkParts.join('\n');
 
     return {
       content,
-      model: anthropicResponse.model,
-      usage: {
-        prompt_tokens: anthropicResponse.usage?.input_tokens || 0,
-        completion_tokens: anthropicResponse.usage?.output_tokens || 0,
-        total_tokens: (anthropicResponse.usage?.input_tokens || 0) +
-                     (anthropicResponse.usage?.output_tokens || 0)
-      },
-      raw: anthropicResponse
+      epc: epcFromResponse({ content, reasoningContent }),
+      raw: anthropicResponse,
     };
   }
 

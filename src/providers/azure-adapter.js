@@ -1,4 +1,5 @@
 import { ProviderError } from './provider-error-adapter.js';
+import { epcFromResponse } from './epc-codec.js';
 /**
  * Azure OpenAI API 适配器
  *
@@ -111,25 +112,26 @@ export class AzureOpenAIAdapter {
     }
 
     const data = await response.json();
-    const choice = data.choices?.[0];
+    const msg = data.choices?.[0]?.message || {};
+    const rawContent = msg.content || '';
+    const reasoningContent = msg.reasoning_content || '';
+    const content = reasoningContent
+      ? rawContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+      : rawContent;
 
-    const result = {
-      content: choice?.message?.content || '',
-      model: data.model || deploymentId,
-      usage: data.usage,
-      raw: data
+    const contentBlocks = [];
+    if (reasoningContent) contentBlocks.push({ type: 'thinking', thinking: reasoningContent });
+    contentBlocks.push({ type: 'text', text: content });
+
+    const toolCalls = (msg.tool_calls || []).map(tc => ({
+      id: tc.id, name: tc.function.name, arguments: tc.function.arguments,
+    }));
+
+    return {
+      content,
+      epc: epcFromResponse({ content, reasoningContent, toolCalls }),
+      raw: data,
     };
-
-    // Tool calls
-    if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
-      result.toolCalls = choice.message.tool_calls.map(tc => ({
-        id: tc.id,
-        name: tc.function.name,
-        arguments: tc.function.arguments
-      }));
-    }
-
-    return result;
   }
 
   /**

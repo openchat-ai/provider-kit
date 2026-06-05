@@ -17,6 +17,8 @@
  * });
  */
 
+import { epcFromResponse } from './epc-codec.js';
+
 export class OpenAICompatibleProvider {
   constructor(config) {
     this.id = config.id || 'openai-compatible';
@@ -111,26 +113,37 @@ export class OpenAICompatibleProvider {
     }
 
     const data = await response.json();
-    const choice = data.choices?.[0];
+    const msg = data.choices?.[0]?.message || {};
+    const rawContent = msg.content || '';
+    const reasoningContent = msg.reasoning_content || '';
+    const content = rawContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 
-    // 处理 Function Calling 响应
-    const result = {
-      content: choice?.message?.content || '',
-      model: data.model,
-      usage: data.usage,
-      raw: data
-    };
+    const contentBlocks = [];
+    if (reasoningContent) contentBlocks.push({ type: 'thinking', thinking: reasoningContent });
+    contentBlocks.push({ type: 'text', text: content });
 
-    // 如果有工具调用，解析并返回
-    if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
-      result.toolCalls = choice.message.tool_calls.map(tc => ({
-        id: tc.id,
-        name: tc.function.name,
-        arguments: tc.function.arguments
-      }));
+    let toolCalls = (msg.tool_calls || []).map(tc => ({
+      id: tc.id, name: tc.function.name, arguments: tc.function.arguments,
+    }));
+
+    // Text fallback: parse ACTION: pattern for models without FC support
+    if (toolCalls.length === 0 && rawContent.includes('ACTION:')) {
+      const match = rawContent.match(/ACTION:\s*(\w+)\s*({[\s\S]*?})/);
+      if (match) {
+        const [, name, argsStr] = match;
+        try {
+          JSON.parse(argsStr);
+          toolCalls = [{ id: `textfb_${Date.now()}`, name, arguments: argsStr }];
+        } catch {}
+      }
     }
 
-    return result;
+    return {
+      content,
+      toolCalls,
+      epc: epcFromResponse({ content, reasoningContent, toolCalls }),
+      raw: data,
+    };
   }
 
   /**
@@ -178,24 +191,80 @@ export class OpenAICompatibleProvider {
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
+    let buf = '';
+    let inThink = false;
+    let pendingContent = ''; // content buffer
 
-    // 用于累积工具调用
+    // 累积 FC tool_calls
     const toolCallChunks = new Map();
+
+    // 非 FC 模型的文本缓冲：当期待 FC 但模型不支援时，先缓冲内容
+    const expectTools = !!(options.tools && options.tools.length > 0);
+    const textBuffer = expectTools ? [] : null; // buffer text chunks, flush at end if no text-fallback match
+
+    function* parseThink(text) {
+      const parts = text.split(/(<think>|<\/think>)/);
+      for (const p of parts) {
+        if (p === '<think>') {
+          if (textBuffer) {
+            textBuffer.push(pendingContent); pendingContent = '';
+          } else {
+            if (pendingContent) { yield { type: 'content', content: pendingContent, done: false }; pendingContent = ''; }
+          }
+          inThink = true;
+        } else if (p === '</think>') {
+          inThink = false;
+        } else if (p) {
+          if (inThink) {
+            yield { type: 'thinking', content: p, done: false };
+          } else {
+            pendingContent += p;
+          }
+        }
+      }
+    }
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
 
       for (const line of lines) {
         if (line.startsWith('data: ')) {
           const data = line.slice(6);
           if (data === '[DONE]') {
-            // 处理累积的工具调用
+            // Flush pending content into textBuffer if buffering
+            if (textBuffer && pendingContent) {
+              textBuffer.push(pendingContent); pendingContent = '';
+            }
+
+            // Text fallback: if expecting FC but got no tool_calls, check for ACTION:
+            const fullContent = textBuffer ? textBuffer.join('') : pendingContent;
+            if (expectTools && toolCallChunks.size === 0 && fullContent.includes('ACTION:')) {
+              const match = fullContent.match(/ACTION:\s*(\w+)\s*({[\s\S]*?})/);
+              if (match) {
+                const [, name, argsStr] = match;
+                try {
+                  JSON.parse(argsStr);
+                  pendingContent = '';
+                  if (textBuffer) textBuffer.length = 0;
+                  yield { type: 'tool_calls', toolCalls: [{ id: `textfb_${Date.now()}`, name, arguments: argsStr }], done: false };
+                  return;
+                } catch {}
+              }
+            }
+
+            // Flush buffered content
+            if (textBuffer) {
+              const flushed = textBuffer.join('');
+              textBuffer.length = 0;
+              if (flushed) { yield { type: 'content', content: flushed, done: false }; }
+            }
+            if (pendingContent) { yield { type: 'content', content: pendingContent, done: false }; pendingContent = ''; }
+
             if (toolCallChunks.size > 0) {
               const toolCalls = Array.from(toolCallChunks.values()).map(tc => ({
                 id: tc.id,
@@ -211,12 +280,29 @@ export class OpenAICompatibleProvider {
             const json = JSON.parse(data);
             const delta = json.choices?.[0]?.delta;
 
-            // 处理内容
             if (delta?.content) {
-              yield { type: 'content', content: delta.content, done: false };
+              if (textBuffer) {
+                // Buffer content without yielding
+                const parts = delta.content.split(/(<think>|<\/think>)/);
+                for (const p of parts) {
+                  if (p === '<think>') {
+                    if (pendingContent) { textBuffer.push(pendingContent); pendingContent = ''; }
+                    inThink = true;
+                  } else if (p === '</think>') {
+                    inThink = false;
+                  } else if (p) {
+                    if (inThink) {
+                      yield { type: 'thinking', content: p, done: false };
+                    } else {
+                      pendingContent += p;
+                    }
+                  }
+                }
+              } else {
+                yield* parseThink(delta.content);
+              }
             }
 
-            // 处理流式工具调用
             if (delta?.tool_calls) {
               for (const tc of delta.tool_calls) {
                 const idx = tc.index || 0;
@@ -236,7 +322,7 @@ export class OpenAICompatibleProvider {
       }
     }
 
-    yield { done: true };
+    if (pendingContent) { yield { type: 'content', content: pendingContent, done: false }; }
   }
 
   /**

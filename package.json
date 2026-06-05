@@ -1,6 +1,7 @@
 {
   "name": "provider-kit",
   "version": "1.3.0",
+  "description": "One API for 42 LLM providers — OpenAI, Anthropic, Ollama, Gemini, and 38 more. Built-in retry, timeout, error classification, model fallback routing, Function Calling with text fallback for non-FC models.",
   "type": "module",
   "main": "./src/index.js",
   "exports": {

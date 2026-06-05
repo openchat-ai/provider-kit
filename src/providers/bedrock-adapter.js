@@ -1,4 +1,5 @@
 import { ProviderError } from './provider-error-adapter.js';
+import { epcFromResponse } from './epc-codec.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -276,11 +277,23 @@ export class BedrockProxyAdapter {
     }
 
     const data = await response.json();
+    const msg = data.choices?.[0]?.message || {};
+    const rawContent = msg.content || '';
+    const reasoningContent = msg.reasoning_content || '';
+    const content = reasoningContent ? rawContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim() : rawContent;
+
+    const contentBlocks = [];
+    if (reasoningContent) contentBlocks.push({ type: 'thinking', thinking: reasoningContent });
+    contentBlocks.push({ type: 'text', text: content });
+
+    const toolCalls = (msg.tool_calls || []).map(tc => ({
+      id: tc.id, name: tc.function.name, arguments: tc.function.arguments,
+    }));
+
     return {
-      content: data.choices?.[0]?.message?.content || '',
-      model: data.model,
-      usage: data.usage,
-      raw: data
+      content,
+      epc: epcFromResponse({ content, reasoningContent, toolCalls }),
+      raw: data,
     };
   }
 

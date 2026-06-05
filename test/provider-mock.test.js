@@ -30,7 +30,7 @@ describe('provider mock integration', () => {
     p.connected = true;
     const r = await p.chat('gpt-4', [{ role: 'user', content: 'Hi' }]);
     assert.strictEqual(r.content, 'Hello');
-    assert.strictEqual(r.usage.total_tokens, 15);
+    assert.strictEqual(r.raw.usage.total_tokens, 15);
   });
 
   test('OpenAI 429 returns rate_limit type', async () => {

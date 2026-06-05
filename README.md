@@ -104,7 +104,7 @@ setTimeout(() => cancel('User stopped'), 3000)
 const stream = provider.chatStream('gpt-4', messages, { signal })
 ```
 
-### Function Calling
+### Function Calling (with fallback for non-FC models)
 
 ```js
 const reply = await provider.chat('gpt-4', messages, {
@@ -124,6 +124,27 @@ if (reply.toolCalls) {
   console.log(reply.toolCalls[0].name)       // → "get_weather"
   console.log(reply.toolCalls[0].arguments)   // → { city: "Tokyo" }
 }
+```
+
+For models without native Function Calling support (e.g. MiniMax, some local models), the provider-kit automatically falls back to text-based `ACTION:` parsing. If the model outputs:
+
+```
+ACTION: get_weather { "city": "Tokyo" }
+```
+
+It will be parsed into proper `toolCalls` — no code changes needed.
+
+### Streaming with non-FC models
+
+When streaming with a model that doesn't support FC, the stream may return empty content. Call `chat()` as a fallback:
+
+```js
+const stream = provider.chatStream(model, messages, { tools })
+for await (const chunk of stream) {
+  // non-FC models may yield little or no content here
+}
+// Fallback: chat() handles both FC and text-based ACTION:
+const reply = await provider.chat(model, messages, { tools })
 ```
 
 ### Error handling

@@ -11,6 +11,8 @@ import { ProviderError } from './provider-error-adapter.js';
  * 参考文档: https://ai.google.dev/api/rest
  */
 
+import { epcFromResponse } from './epc-codec.js';
+
 export class GeminiAdapter {
   constructor(config) {
     this.id = config.id || 'gemini';
@@ -85,21 +87,35 @@ export class GeminiAdapter {
   }
 
   /**
-   * 转换响应格式: Gemini -> OpenAI
+   * 转换响应格式: Gemini -> 统一格式
+   *
+   * Gemini API 返回的 parts 数组可能包含 thinking 和文本：
+   * - { text: '...' }               → content 或 reasoningContent
+   * - { text: '...', thought: true } → reasoningContent（当 includeThoughts 启用时）
+   *
+   * 参考: https://ai.google.dev/gemini-api/docs/thinking
    */
   convertResponse(geminiResponse) {
-    const candidate = geminiResponse.candidates?.[0];
-    const content = candidate?.content?.parts?.map(p => p.text).join('') || '';
+    const parts = geminiResponse.candidates?.[0]?.content?.parts || [];
+    const textParts = [];
+    const thinkParts = [];
+
+    for (const p of parts) {
+      if (!p.text) continue;
+      if (p.thought) {
+        thinkParts.push(p.text);
+      } else {
+        textParts.push(p.text);
+      }
+    }
+
+    const content = textParts.join('');
+    const reasoningContent = thinkParts.join('\n');
 
     return {
       content,
-      model: geminiResponse.modelVersion || this.defaultModel,
-      usage: {
-        prompt_tokens: geminiResponse.usageMetadata?.promptTokenCount || 0,
-        completion_tokens: geminiResponse.usageMetadata?.candidatesTokenCount || 0,
-        total_tokens: geminiResponse.usageMetadata?.totalTokenCount || 0
-      },
-      raw: geminiResponse
+      epc: epcFromResponse({ content, reasoningContent }),
+      raw: geminiResponse,
     };
   }
 
