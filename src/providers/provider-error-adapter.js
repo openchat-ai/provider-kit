@@ -75,15 +75,16 @@ export function classifyError(error, provider) {
   if (error instanceof Error) {
     const msg = error.message.toLowerCase();
     // 顺序：先匹配网络/超时（最具体），再匹配 4xx/5xx（避免 '4' 误匹配 IP）
+    const hasCode = (code) => msg.includes(` ${code}`) || msg.startsWith(code) || msg.includes(`http ${code}`) || msg.includes(`status ${code}`);
     const type = msg.includes('econnrefused') || msg.includes('enotfound') || msg.includes('eai_again') || msg.includes('network') || msg.includes('fetch failed') ? 'network'
       : msg.includes('timeout') || msg.includes('timed out') || msg.includes('etimedout') ? 'timeout'
-      : msg.includes('rate') || /\b429\b/.test(msg) ? 'rate_limit'
-      : msg.includes('auth') || /\b401\b/.test(msg) || msg.includes('unauthorized') || msg.includes('api key') || msg.includes('apikey') || msg.includes('invalid key') ? 'auth'
-      : msg.includes('quota') || /\b402\b/.test(msg) ? 'quota'
-      : msg.includes('forbidden') || /\b403\b/.test(msg) ? 'auth'
-      : msg.includes('not found') || /\b404\b/.test(msg) ? 'bad_request'
-      : /\b5\d{2}\b/.test(msg) || msg.includes('server error') ? 'server_error'
-      : /\b4\d{2}\b/.test(msg) || msg.includes('bad request') ? 'bad_request'
+      : msg.includes('rate') || hasCode('429') ? 'rate_limit'
+      : msg.includes('auth') || hasCode('401') || msg.includes('unauthorized') || msg.includes('api key') || msg.includes('apikey') || msg.includes('invalid key') ? 'auth'
+      : msg.includes('quota') || hasCode('402') ? 'quota'
+      : msg.includes('forbidden') || hasCode('403') ? 'auth'
+      : msg.includes('not found') || hasCode('404') ? 'bad_request'
+      : hasCode('500') || hasCode('502') || hasCode('503') || hasCode('504') || msg.includes('server error') ? 'server_error'
+      : hasCode('400') || hasCode('422') || msg.includes('bad request') ? 'bad_request'
       : 'unknown';
     return new ProviderError(error.message, { provider, type, retryable: type === 'timeout' || type === 'server_error' || type === 'network' || type === 'rate_limit' });
   }

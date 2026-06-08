@@ -1,24 +1,108 @@
 // LLM 响应标准化纯函数 (provider 无关)
 //
-// 这些处理在 OpenAI/Azure/Bedrock 等多个 adapter 里重复出现,抽出来做单一来源:
-//   ① stripThink           — 剥 <think>...</think> 块
+//   ① extractContent       — 自动识别 JSON/XML/string 格式并提取文本内容
 //   ② extractReasoning     — 提取 reasoning_content / reasoningContent 字段
 //   ③ normalizeToolCalls   — OpenAI 嵌套 {function:{name,arguments}} → 扁平 {name,arguments}
-//                            兼容已扁平输入 (幂等,二次调用不破坏数据)
 //   ④ parseActionFallback  — 文本协议降级: "ACTION: name {json}" → 伪 toolCall
 //
 // 设计原则:
-//   - 纯函数,无副作用
-//   - 幂等: 二次调用得到相同结果 (避免下游再处理一次时数据丢失)
-//   - 容忍: null/undefined/非预期类型不抛错
+//   - 纯函数,无副作用; 幂等; 容忍非预期输入; 零正则
+//   - 零硬编码: 不写死任何 provider 特定字符串或标签名
+//   - 格式自识别: 靠结构特征 (首尾字符 + 能否 parse) 判断,不靠关键字匹配
 
-const THINK_RE = /<think>[\s\S]*?<\/think>/g;
-const ACTION_RE = /ACTION:\s*(\w+)\s*({[\s\S]*?})/;
+/**
+ * ① 自动识别 JSON/XML/string 并提取文本内容
+ *
+ * 检测顺序:
+ *   1. JSON: 首字符是 { 或 [ → 尝试 parse → 深度遍历收集所有字符串值
+ *   2. XML : 首字符是 < 且末字符是 > → 逐字符扫描剥离标签,收集标签间文本
+ *   3. 默认: 原样返回 (仅规整空白)
+ *
+ * 不写死任何标签名/字段名/分隔符。
+ */
+export function extractContent(raw) {
+  if (typeof raw !== 'string') return '';
+  const s = raw.trim();
+  if (!s) return '';
+  const first = s[0];
 
-/** ① 剥 <think>...</think> 块 (含多行) */
-export function stripThink(rawContent) {
-  if (typeof rawContent !== 'string') return '';
-  return rawContent.replace(THINK_RE, '').trim();
+  // JSON
+  if (first === '{' || first === '[') {
+    try { return extractFromJson(JSON.parse(s)); } catch {}
+  }
+
+  // XML (仅靠首个字符判断)
+  if (first === '<') {
+    return extractFromXml(s);
+  }
+
+  // 内容内嵌 <...> (如 `txt.<]minimax[>stuff`) — 取 `<` 前文本 + XML 内容
+  const firstAngle = s.indexOf('<');
+  if (firstAngle !== -1) {
+    const prefix = trimDelimTail(s.slice(0, firstAngle));
+    const extracted = extractFromXml(s.slice(firstAngle));
+    if (extracted) {
+      return prefix ? prefix + ' ' + extracted : extracted;
+    }
+  }
+
+  return normalizeSpace(s);
+}
+
+function extractFromJson(value, visited = new Set()) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    const p = [];
+    for (const v of value) { const t = extractFromJson(v, visited); if (t) p.push(t); }
+    return p.join('\n');
+  }
+  if (typeof value === 'object') {
+    if (visited.has(value)) return '';
+    visited.add(value);
+    const p = [];
+    for (const v of Object.values(value)) { const t = extractFromJson(v, visited); if (t) p.push(t); }
+    return p.join('\n');
+  }
+  return '';
+}
+
+function extractFromXml(s) {
+  const p = [];
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === '<') {
+      while (i < s.length && s[i] !== '>') i++;
+      if (i < s.length) i++;
+    } else {
+      let t = '';
+      while (i < s.length && s[i] !== '<') { t += s[i]; i++; }
+      const tt = t.trim();
+      if (tt) p.push(tt);
+    }
+  }
+  return p.join(' ');
+}
+
+function normalizeSpace(s) {
+  let o = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '\n' || c === '\t' || c === '\r') { o += ' '; } else { o += c; }
+  }
+  return o.trim();
+}
+
+/** 去除尾部非内容字符 (配对括号/尖括号等,归类为格式残余) */
+function trimDelimTail(s) {
+  let i = s.length;
+  while (i > 0) {
+    const c = s[i - 1];
+    if (c === ']' || c === '[' || c === ')' || c === '(' || c === '>' || c === '<' || c === '}' || c === '{') { i--; continue; }
+    break;
+  }
+  return s.slice(0, i).trimEnd();
 }
 
 /** ② 提取 reasoning_content / reasoningContent (两种命名都兼容) */
@@ -59,9 +143,30 @@ export function normalizeToolCalls(rawToolCalls) {
 export function parseActionFallback(rawContent, existingToolCalls) {
   if (Array.isArray(existingToolCalls) && existingToolCalls.length > 0) return existingToolCalls;
   if (typeof rawContent !== 'string' || !rawContent.includes('ACTION:')) return existingToolCalls || [];
-  const match = rawContent.match(ACTION_RE);
-  if (!match) return existingToolCalls || [];
-  const [, name, argsStr] = match;
+  // String-based: find "ACTION:", extract name and JSON body
+  const prefix = 'ACTION:';
+  const startIdx = rawContent.indexOf(prefix);
+  if (startIdx === -1) return existingToolCalls || [];
+  const afterAction = rawContent.slice(startIdx + prefix.length).trimStart();
+  // Extract tool name (word characters until space or {)
+  let nameEnd = 0;
+  while (nameEnd < afterAction.length && afterAction[nameEnd] !== ' ' && afterAction[nameEnd] !== '{' && afterAction[nameEnd] !== '\n') {
+    nameEnd++;
+  }
+  const name = afterAction.slice(0, nameEnd);
+  if (!name) return existingToolCalls || [];
+  // Find JSON body starting with {
+  const jsonStart = afterAction.indexOf('{', nameEnd);
+  if (jsonStart === -1) return existingToolCalls || [];
+  // Match braces to find the JSON body end (handles nested braces)
+  let depth = 0;
+  let jsonEnd = -1;
+  for (let i = jsonStart; i < afterAction.length; i++) {
+    if (afterAction[i] === '{') depth++;
+    if (afterAction[i] === '}') { depth--; if (depth === 0) { jsonEnd = i; break; } }
+  }
+  if (jsonEnd === -1) return existingToolCalls || [];
+  const argsStr = afterAction.slice(jsonStart, jsonEnd + 1);
   try {
     JSON.parse(argsStr);
     return [{ id: `textfb_${Date.now()}`, name, arguments: argsStr }];

@@ -18,7 +18,7 @@
  */
 
 import { epcFromResponse } from './epc-codec.js';
-import { stripThink, extractReasoning, normalizeToolCalls, parseActionFallback } from '../utils/normalize.js';
+import { extractContent, extractReasoning, normalizeToolCalls, parseActionFallback } from '../utils/normalize.js';
 
 export class OpenAICompatibleProvider {
   constructor(config) {
@@ -117,7 +117,7 @@ export class OpenAICompatibleProvider {
     const msg = data.choices?.[0]?.message || {};
     const rawContent = msg.content || '';
     const reasoningContent = extractReasoning(msg);
-    const content = stripThink(rawContent);
+    const content = extractContent(rawContent);
 
     const contentBlocks = [];
     if (reasoningContent) contentBlocks.push({ type: 'thinking', thinking: reasoningContent });
@@ -192,23 +192,41 @@ export class OpenAICompatibleProvider {
     const textBuffer = expectTools ? [] : null; // buffer text chunks, flush at end if no text-fallback match
 
     function* parseThink(text) {
-      const parts = text.split(/(<think>|<\/think>)/);
-      for (const p of parts) {
-        if (p === '<think>') {
+      let remaining = text;
+      while (remaining.length > 0) {
+        const thinkOpen = remaining.indexOf('<think>');
+        const thinkClose = remaining.indexOf('</think>');
+        // Pick the earliest tag
+        const firstOpen = thinkOpen !== -1 ? thinkOpen : Infinity;
+        const firstClose = thinkClose !== -1 ? thinkClose : Infinity;
+        if (firstOpen === Infinity && firstClose === Infinity) {
+          if (inThink) {
+            yield { type: 'thinking', content: remaining, done: false };
+          } else {
+            pendingContent += remaining;
+          }
+          break;
+        }
+        const first = Math.min(firstOpen, firstClose);
+        const prefix = remaining.slice(0, first);
+        if (prefix) {
+          if (inThink) {
+            yield { type: 'thinking', content: prefix, done: false };
+          } else {
+            pendingContent += prefix;
+          }
+        }
+        if (firstOpen < firstClose) {
           if (textBuffer) {
             textBuffer.push(pendingContent); pendingContent = '';
           } else {
             if (pendingContent) { yield { type: 'content', content: pendingContent, done: false }; pendingContent = ''; }
           }
           inThink = true;
-        } else if (p === '</think>') {
+          remaining = remaining.slice(firstOpen + 7);
+        } else {
           inThink = false;
-        } else if (p) {
-          if (inThink) {
-            yield { type: 'thinking', content: p, done: false };
-          } else {
-            pendingContent += p;
-          }
+          remaining = remaining.slice(firstClose + 8);
         }
       }
     }
@@ -266,26 +284,7 @@ export class OpenAICompatibleProvider {
             const delta = json.choices?.[0]?.delta;
 
             if (delta?.content) {
-              if (textBuffer) {
-                // Buffer content without yielding
-                const parts = delta.content.split(/(<think>|<\/think>)/);
-                for (const p of parts) {
-                  if (p === '<think>') {
-                    if (pendingContent) { textBuffer.push(pendingContent); pendingContent = ''; }
-                    inThink = true;
-                  } else if (p === '</think>') {
-                    inThink = false;
-                  } else if (p) {
-                    if (inThink) {
-                      yield { type: 'thinking', content: p, done: false };
-                    } else {
-                      pendingContent += p;
-                    }
-                  }
-                }
-              } else {
-                yield* parseThink(delta.content);
-              }
+              yield* parseThink(delta.content);
             }
 
             if (delta?.tool_calls) {

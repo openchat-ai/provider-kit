@@ -1,5 +1,6 @@
 import { ProviderError } from './provider-error-adapter.js';
 import { epcFromResponse } from './epc-codec.js';
+import { extractContent } from '../utils/normalize.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -280,7 +281,7 @@ export class BedrockProxyAdapter {
     const msg = data.choices?.[0]?.message || {};
     const rawContent = msg.content || '';
     const reasoningContent = msg.reasoning_content || '';
-    const content = reasoningContent ? rawContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim() : rawContent;
+    const content = extractContent(rawContent);
 
     const contentBlocks = [];
     if (reasoningContent) contentBlocks.push({ type: 'thinking', thinking: reasoningContent });

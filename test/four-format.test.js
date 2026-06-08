@@ -33,7 +33,7 @@ async function test(name, fn) {
 }
 
 // — run tests —
-const r1 = mock({ choices: [{ message: { content: 'Hello<think>r</think>World', reasoning_content: 'r', tool_calls: [{ id: 'c1', function: { name: 'fn', arguments: '{}' } }] } }] });
+const r1 = mock({ choices: [{ message: { content: '{"text":"HelloWorld"}', reasoning_content: 'r', tool_calls: [{ id: 'c1', function: { name: 'fn', arguments: '{}' } }] } }] });
 const p1 = new OpenAICompatibleProvider({ skipAuth: true, baseUrl: 'http://0.0.0.0:1' });
 await p1.connect();
 const res1 = await p1.chat('m', [{ role: 'user', content: 'hi' }]);

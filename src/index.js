@@ -15,7 +15,7 @@ export { ProviderManager, providerManager, getRuntimeApiKey, getRuntimeBaseUrl, 
 export { providerRegistry, createProvider, listPresetProviders, PRESET_PROVIDERS } from './providers/provider-registry.js';
 export { LocalAiProvider, createLocalProvider } from './providers/local-provider.js';
 // LLM 响应标准化纯函数 — 供 openchat 双向网关等下游使用 (幂等,二次调用安全)
-export { stripThink, extractReasoning, normalizeToolCalls, parseActionFallback } from './utils/normalize.js';
+export { extractContent, extractReasoning, normalizeToolCalls, parseActionFallback } from './utils/normalize.js';
 export { persistentConfig, createStore, setKeyResolver, clearKeyResolver, hasKeyResolver, resolveApiKey } from './core/persistent-config.js';
 export { encodeEpcFrame, epcFromResponse, parseEpcPayload, scanNextFrame, verifyFrameCs, parseFrames,
   EPC_TYPE_LLM, EPC_TYPE_AGENT, EPC_TYPE_MEDIA, EPC_TYPE_IMAGE, EPC_TYPE_FS, EPC_TYPE_S3, EPC_TYPE_EXEC, EPC_TYPE_CHAT, EPC_TYPE_ROOM, EPC_TYPE_CALL, EPC_TYPE_SIGNAL, EPC_TYPE_SDUI, EPC_TYPE_SECURITY, EPC_TYPE_SYSTEM, EPC_TYPE_DEBUG, EPC_TYPE_FILE_XFER, EPC_TYPE_PLUGIN, EPC_TYPE_UI_INPUT, EPC_TYPE_NETWORK, EPC_TYPE_TRANSPORT, EPC_TYPE_DB, EPC_TYPE_BIZ_EXT, EPC_TYPE_EXPER, EPC_TYPE_RAW,

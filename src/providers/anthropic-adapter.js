@@ -1,5 +1,6 @@
 import { ProviderError } from './provider-error-adapter.js';
 import { epcFromResponse } from './epc-codec.js';
+import { extractContent } from '../utils/normalize.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -217,7 +218,7 @@ export class AnthropicAdapter {
       }
     }
 
-    const content = textParts.join('');
+    const content = extractContent(textParts.join(''));
     const reasoningContent = thinkParts.join('\n');
 
     return {
