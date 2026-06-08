@@ -45,8 +45,9 @@ export async function withRetry(fn, { retries = 2, baseDelay = 1000, provider } 
     } catch (e) {
       if (e instanceof AbortError) throw e;
       if (i === retries) throw e;
-      const isRetryable = e instanceof ProviderError ? e.retryable : true;
-      if (!isRetryable) throw e;
+      // 错误分类：ProviderError 自带 retryable 字段；其他错误用 classifyError
+      const classified = e instanceof ProviderError ? e : classifyError(e, provider);
+      if (!classified.retryable) throw classified;
       // Exponential backoff with jitter (±25%) to prevent thundering herd
       const delay = baseDelay * Math.pow(2, i);
       const jitter = delay * (0.75 + Math.random() * 0.5);
@@ -73,13 +74,16 @@ export function classifyError(error, provider) {
   if (error instanceof AbortError) return error;
   if (error instanceof Error) {
     const msg = error.message.toLowerCase();
-    const type = msg.includes('rate') || msg.includes('429') ? 'rate_limit'
-      : msg.includes('auth') || msg.includes('401') || msg.includes('key') ? 'auth'
-      : msg.includes('timeout') || msg.includes('timed out') ? 'timeout'
-      : msg.includes('5') || msg.includes('server') ? 'server_error'
-      : msg.includes('quota') || msg.includes('402') ? 'quota'
-      : msg.includes('4') || msg.includes('bad') || msg.includes('invalid') ? 'bad_request'
-      : msg.includes('econnrefused') || msg.includes('enotfound') || msg.includes('network') ? 'network'
+    // 顺序：先匹配网络/超时（最具体），再匹配 4xx/5xx（避免 '4' 误匹配 IP）
+    const type = msg.includes('econnrefused') || msg.includes('enotfound') || msg.includes('eai_again') || msg.includes('network') || msg.includes('fetch failed') ? 'network'
+      : msg.includes('timeout') || msg.includes('timed out') || msg.includes('etimedout') ? 'timeout'
+      : msg.includes('rate') || /\b429\b/.test(msg) ? 'rate_limit'
+      : msg.includes('auth') || /\b401\b/.test(msg) || msg.includes('unauthorized') || msg.includes('api key') || msg.includes('apikey') || msg.includes('invalid key') ? 'auth'
+      : msg.includes('quota') || /\b402\b/.test(msg) ? 'quota'
+      : msg.includes('forbidden') || /\b403\b/.test(msg) ? 'auth'
+      : msg.includes('not found') || /\b404\b/.test(msg) ? 'bad_request'
+      : /\b5\d{2}\b/.test(msg) || msg.includes('server error') ? 'server_error'
+      : /\b4\d{2}\b/.test(msg) || msg.includes('bad request') ? 'bad_request'
       : 'unknown';
     return new ProviderError(error.message, { provider, type, retryable: type === 'timeout' || type === 'server_error' || type === 'network' || type === 'rate_limit' });
   }

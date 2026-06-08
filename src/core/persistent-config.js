@@ -10,7 +10,7 @@
  */
 
 import { resolve } from 'path';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, statSync } from 'fs';
 
 function resolveConfigPath() {
   const envPath = process.env.PROVIDER_KIT_CONFIG_PATH;
@@ -36,6 +36,8 @@ class PersistentConfig {
       const data = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
       this._store = data.store || {};
       this._apiKeys = data.apiKeys || {};
+      // 加载时收紧权限（unix only；Windows 忽略）
+      this._tightenPerms();
     } catch {
       this._store = {};
       this._apiKeys = {};
@@ -46,10 +48,22 @@ class PersistentConfig {
     if (this._readOnly) return;
     try {
       mkdirSync(resolve(CONFIG_PATH, '..'), { recursive: true });
-      writeFileSync(CONFIG_PATH, JSON.stringify({ store: this._store, apiKeys: this._apiKeys }, null, 2), 'utf8');
+      writeFileSync(CONFIG_PATH, JSON.stringify({ store: this._store, apiKeys: this._apiKeys }, null, 2), { encoding: 'utf8', mode: 0o600 });
+      this._tightenPerms();
     } catch {
       // silent: 只读容器 / 权限不足
     }
+  }
+
+  _tightenPerms() {
+    if (process.platform === 'win32') return;
+    try {
+      const st = statSync(CONFIG_PATH);
+      // 只在当前权限过宽时收紧，避免每次写盘都 chmod
+      if ((st.mode & 0o077) !== 0) {
+        chmodSync(CONFIG_PATH, 0o600);
+      }
+    } catch {}
   }
 
   getApiKey(provider) {

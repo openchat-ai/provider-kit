@@ -18,6 +18,7 @@
  */
 
 import { epcFromResponse } from './epc-codec.js';
+import { stripThink, extractReasoning, normalizeToolCalls, parseActionFallback } from '../utils/normalize.js';
 
 export class OpenAICompatibleProvider {
   constructor(config) {
@@ -115,28 +116,16 @@ export class OpenAICompatibleProvider {
     const data = await response.json();
     const msg = data.choices?.[0]?.message || {};
     const rawContent = msg.content || '';
-    const reasoningContent = msg.reasoning_content || '';
-    const content = rawContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const reasoningContent = extractReasoning(msg);
+    const content = stripThink(rawContent);
 
     const contentBlocks = [];
     if (reasoningContent) contentBlocks.push({ type: 'thinking', thinking: reasoningContent });
     contentBlocks.push({ type: 'text', text: content });
 
-    let toolCalls = (msg.tool_calls || []).map(tc => ({
-      id: tc.id, name: tc.function.name, arguments: tc.function.arguments,
-    }));
-
-    // Text fallback: parse ACTION: pattern for models without FC support
-    if (toolCalls.length === 0 && rawContent.includes('ACTION:')) {
-      const match = rawContent.match(/ACTION:\s*(\w+)\s*({[\s\S]*?})/);
-      if (match) {
-        const [, name, argsStr] = match;
-        try {
-          JSON.parse(argsStr);
-          toolCalls = [{ id: `textfb_${Date.now()}`, name, arguments: argsStr }];
-        } catch {}
-      }
-    }
+    // ① normalize OpenAI-original 嵌套 tool_calls → 扁平; ② ACTION: 文本降级 (textfb_)
+    let toolCalls = normalizeToolCalls(msg.tool_calls);
+    toolCalls = parseActionFallback(rawContent, toolCalls);
 
     return {
       content,
@@ -241,19 +230,15 @@ export class OpenAICompatibleProvider {
               textBuffer.push(pendingContent); pendingContent = '';
             }
 
-            // Text fallback: if expecting FC but got no tool_calls, check for ACTION:
+            // Text fallback: if expecting FC but got no tool_calls, use parseActionFallback()
             const fullContent = textBuffer ? textBuffer.join('') : pendingContent;
             if (expectTools && toolCallChunks.size === 0 && fullContent.includes('ACTION:')) {
-              const match = fullContent.match(/ACTION:\s*(\w+)\s*({[\s\S]*?})/);
-              if (match) {
-                const [, name, argsStr] = match;
-                try {
-                  JSON.parse(argsStr);
-                  pendingContent = '';
-                  if (textBuffer) textBuffer.length = 0;
-                  yield { type: 'tool_calls', toolCalls: [{ id: `textfb_${Date.now()}`, name, arguments: argsStr }], done: false };
-                  return;
-                } catch {}
+              const fallbackTcs = parseActionFallback(fullContent, []);
+              if (fallbackTcs.length > 0) {
+                pendingContent = '';
+                if (textBuffer) textBuffer.length = 0;
+                yield { type: 'tool_calls', toolCalls: fallbackTcs, done: false };
+                return;
               }
             }
 
@@ -669,9 +654,9 @@ export const PRESET_PROVIDERS = {
   minimax: {
     name: 'MiniMax',
     nameCn: 'MiniMax',
-    baseUrl: 'https://api.minimax.chat/v1',
-    defaultModel: 'abab6.5s-chat',
-    description: '海螺AI'
+    baseUrl: 'https://api.minimaxi.com/v1',
+    defaultModel: 'MiniMax-M3',
+    description: 'MiniMax token plan'
   },
   siliconflow: {
     name: 'SiliconFlow',

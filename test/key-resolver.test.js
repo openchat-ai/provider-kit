@@ -66,6 +66,10 @@ describe('key-resolver', () => {
     persistentConfig.removeApiKey('openrouter');
     delete process.env.OPENROUTER_API_KEY;
     clearKeyResolver();
+    // 清掉 OpenChat config 里的 key（如果有），避免新代码路径读到
+    providerRegistry._ocConfig = null;
+    // 强制重新创建
+    providerRegistry.providers.delete('openrouter');
 
     // chat() should reach the "no api key" branch (resolver absent)
     await assert.rejects(
@@ -77,6 +81,8 @@ describe('key-resolver', () => {
   test('chat() bypasses "No API key" error when resolver provides key', async () => {
     persistentConfig.removeApiKey('openrouter');
     delete process.env.OPENROUTER_API_KEY;
+    providerRegistry._ocConfig = null;
+    providerRegistry.providers.delete('openrouter');
     setKeyResolver((name) => name === 'openrouter' ? 'sk-from-resolver' : null);
 
     // Should now NOT throw "No API key" — it will fail at network/connect stage instead

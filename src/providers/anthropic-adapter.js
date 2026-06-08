@@ -97,7 +97,15 @@ export class AnthropicAdapter {
    * 转换消息格式: OpenAI -> Anthropic
    *
    * OpenAI:  [{ role: 'system', content: '...' }, { role: 'user', content: '...' }]
-   * Anthropic: system: '...', messages: [{ role: 'user', content: '...' }]
+   *          + { role: 'assistant', tool_calls: [{id, function:{name, arguments}}] }
+   *          + { role: 'tool', tool_call_id, content }
+   * Anthropic: system: '...', messages: [{ role: 'user', content: '...' },
+   *                                     { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+   *                                     { role: 'user', content: [{ type: 'tool_result', tool_use_id, content }] }]
+   *
+   * 关键转换:
+   * - role: 'assistant', tool_calls → assistant message with tool_use content blocks
+   * - role: 'tool', tool_call_id → user message with tool_result content block (Anthropic 要求 tool_result 必须在 user role)
    */
   convertMessages(messages) {
     const systemMessages = [];
@@ -105,20 +113,70 @@ export class AnthropicAdapter {
 
     for (const msg of messages) {
       if (msg.role === 'system') {
-        systemMessages.push(msg.content);
-      } else if (msg.role === 'user' || msg.role === 'assistant') {
+        systemMessages.push(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
+      } else if (msg.role === 'user') {
         anthropicMessages.push({
-          role: msg.role,
-          content: typeof msg.content === 'string'
-            ? msg.content
-            : JSON.stringify(msg.content)
+          role: 'user',
+          content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
         });
+      } else if (msg.role === 'assistant') {
+        // assistant 可能有 tool_calls (FC 流程) — 转 Anthropic tool_use blocks
+        const blocks = [];
+        if (msg.content && (typeof msg.content === 'string' ? msg.content.trim() : true)) {
+          const text = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+          if (text) blocks.push({ type: 'text', text });
+        }
+        if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
+          for (const tc of msg.tool_calls) {
+            const fn = tc.function || {};
+            let input = {};
+            try {
+              input = typeof fn.arguments === 'string' ? JSON.parse(fn.arguments || '{}') : (fn.arguments || {});
+            } catch {
+              input = { _parse_error: true, raw: String(fn.arguments) };
+            }
+            blocks.push({ type: 'tool_use', id: tc.id, name: fn.name, input });
+          }
+        }
+        if (blocks.length === 0) {
+          // 空 assistant message — Anthropic 不允许, 给个空文本占位
+          blocks.push({ type: 'text', text: '' });
+        }
+        anthropicMessages.push({ role: 'assistant', content: blocks });
+      } else if (msg.role === 'tool') {
+        // OpenAI tool result → Anthropic 必须在 user message 里用 tool_result block
+        // 合并连续 tool results 到同一个 user message
+        const last = anthropicMessages[anthropicMessages.length - 1];
+        const block = {
+          type: 'tool_result',
+          tool_use_id: msg.tool_call_id,
+          content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+        };
+        if (last && last.role === 'user' && Array.isArray(last.content) && last.content.some(c => c.type === 'tool_result')) {
+          last.content.push(block);
+        } else {
+          anthropicMessages.push({ role: 'user', content: [block] });
+        }
+      } else if (msg.role === 'function') {
+        // legacy 'function' role (OpenAI 旧版) — 视为 tool result
+        const last = anthropicMessages[anthropicMessages.length - 1];
+        const block = {
+          type: 'tool_result',
+          tool_use_id: msg.name || 'unknown',
+          content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+        };
+        if (last && last.role === 'user' && Array.isArray(last.content) && last.content.some(c => c.type === 'tool_result')) {
+          last.content.push(block);
+        } else {
+          anthropicMessages.push({ role: 'user', content: [block] });
+        }
       }
+      // 未知 role 跳过 (不抛错, 静默丢弃, 避免外部脏数据炸流程)
     }
 
     return {
       system: systemMessages.join('\n\n'),
-      messages: anthropicMessages
+      messages: anthropicMessages,
     };
   }
 
@@ -136,6 +194,7 @@ export class AnthropicAdapter {
   convertResponse(anthropicResponse) {
     const textParts = [];
     const thinkParts = [];
+    const toolCalls = [];
     const rawBlocks = anthropicResponse.content || [];
 
     for (const block of rawBlocks) {
@@ -145,6 +204,16 @@ export class AnthropicAdapter {
         if (block.thinking) thinkParts.push(block.thinking);
       } else if (block.type === 'redacted_thinking') {
         thinkParts.push('[redacted thinking]');
+      } else if (block.type === 'tool_use') {
+        // Convert Anthropic tool_use → OpenAI-style toolCalls
+        toolCalls.push({
+          id: block.id,
+          type: 'function',
+          function: {
+            name: block.name,
+            arguments: typeof block.input === 'string' ? block.input : JSON.stringify(block.input || {}),
+          },
+        });
       }
     }
 
@@ -153,6 +222,8 @@ export class AnthropicAdapter {
 
     return {
       content,
+      reasoningContent,
+      toolCalls: toolCalls.length ? toolCalls : undefined,
       epc: epcFromResponse({ content, reasoningContent }),
       raw: anthropicResponse,
     };
@@ -284,6 +355,9 @@ export class AnthropicAdapter {
     const decoder = new TextDecoder();
     let buffer = '';
 
+    // Collect tool_use blocks during streaming for batched tool_calls yield
+    const collectedToolCalls = new Map();
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -299,18 +373,37 @@ export class AnthropicAdapter {
           try {
             const json = JSON.parse(data);
 
-            // 处理不同的事件类型
-            if (json.type === 'content_block_delta') {
+            if (json.type === 'content_block_start') {
+              const block = json.content_block;
+              if (block?.type === 'tool_use') {
+                collectedToolCalls.set(json.index, { id: block.id, name: block.name, inputJson: '' });
+              }
+            } else if (json.type === 'content_block_delta') {
               const delta = json.delta;
               if (delta?.type === 'text_delta' && delta.text) {
                 yield { type: 'content', content: delta.text, done: false };
+              } else if (delta?.type === 'input_json_delta' && collectedToolCalls.has(json.index)) {
+                collectedToolCalls.get(json.index).inputJson += delta.partial_json || '';
               }
             } else if (json.type === 'message_stop') {
+              if (collectedToolCalls.size > 0) {
+                const toolCalls = [];
+                for (const tc of collectedToolCalls.values()) {
+                  let args = tc.inputJson;
+                  try { JSON.parse(args); } catch { args = '{}'; }
+                  toolCalls.push({
+                    id: tc.id,
+                    type: 'function',
+                    function: { name: tc.name, arguments: args },
+                  });
+                }
+                yield { type: 'tool_calls', toolCalls };
+              }
               yield { done: true };
               return;
             }
           } catch (e) {
-            // 忽略解析错误
+            // ignore parse errors
           }
         }
       }

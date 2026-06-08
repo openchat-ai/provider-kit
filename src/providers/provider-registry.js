@@ -7,6 +7,9 @@
  * 3. 统一接口 - 所有 OpenAI 兼容 provider 用同一个适配器
  */
 
+import { existsSync, readFileSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 import { OpenAICompatibleProvider, PRESET_PROVIDERS, createProvider, listPresetProviders } from './openai-compatible.js';
 import { AnthropicAdapter, createAnthropicProvider } from './anthropic-adapter.js';
 import { GeminiAdapter, createGeminiProvider } from './gemini-adapter.js';
@@ -15,46 +18,238 @@ import { CohereAdapter, createCohereProvider } from './cohere-adapter.js';
 import { BedrockProxyAdapter, createBedrockProxyProvider } from './bedrock-adapter.js';
 import { persistentConfig, setKeyResolver, clearKeyResolver, hasKeyResolver, resolveApiKey } from '../core/persistent-config.js';
 
+const OPENCHAT_CONFIG_PATHS = [
+  join(homedir(), '.config', 'openchat', 'config.json'),
+  join(homedir(), '.openchat', 'config.json'),
+];
+
+function loadOpenChatConfig() {
+  for (const p of OPENCHAT_CONFIG_PATHS) {
+    try {
+      if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf8'));
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Router Provider — transparent dispatch to model-specific adapters.
+ * Supports per-model multi-protocol entries: { __multiProtocol, strategy, providers: [] }
+ * Strategies:
+ *   - failover (default): try providers in order, fall back on error. Zero waste.
+ *   - race: parallel, first successful response wins. 2x token cost.
+ */
+class RouterProvider {
+  constructor(type, defaultProvider, adapters) {
+    this.id = type;
+    this.name = defaultProvider.name;
+    this.nameCn = defaultProvider.nameCn;
+    this.type = type;
+    this._default = defaultProvider;
+    this._adapters = adapters;
+    this.connected = defaultProvider.connected;
+    this.skipAuth = defaultProvider.skipAuth;
+    this.baseUrl = defaultProvider.baseUrl;
+    this.apiKey = defaultProvider.apiKey;
+    this.defaultModel = defaultProvider.defaultModel;
+    this.models = defaultProvider.models;
+    this.description = defaultProvider.description;
+    this.timeout = defaultProvider.timeout;
+    this.headers = defaultProvider.headers;
+  }
+
+  _resolveEntry(model) {
+    const e = this._adapters.get(model) || this._default;
+    return e;
+  }
+
+  chat(model, messages, opts) {
+    const entry = this._resolveEntry(model);
+    if (entry && entry.__multiProtocol) {
+      return this._multiChat(entry, model, messages, opts);
+    }
+    return entry.chat(model, messages, opts);
+  }
+
+  chatStream(model, messages, opts) {
+    const entry = this._resolveEntry(model);
+    if (entry && entry.__multiProtocol) {
+      // 流式不能用 race（异步迭代器无法抢答），按 failover 处理
+      return this._multiChatStream(entry, model, messages, opts);
+    }
+    return entry.chatStream(model, messages, opts);
+  }
+
+  _multiChat(entry, model, messages, opts) {
+    const { strategy, providers } = entry;
+    if (strategy === 'race') {
+      return Promise.any(providers.map(p =>
+        Promise.resolve().then(() => p.chat(model, messages, opts))
+      ));
+    }
+    // failover（默认）：按顺序试，挂了走下一个
+    return this._failoverChat(providers, model, messages, opts);
+  }
+
+  async _failoverChat(providers, model, messages, opts) {
+    let lastErr;
+    for (const p of providers) {
+      try {
+        return await p.chat(model, messages, opts);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr;
+  }
+
+  async _multiChatStream(entry, model, messages, opts) {
+    const { strategy, providers } = entry;
+    if (strategy === 'race') {
+      // 流式无法 race：异步迭代器无法抢答，用第一个
+      return providers[0].chatStream(model, messages, opts);
+    }
+    // failover（默认）：按顺序试，挂了走下一个
+    let lastErr;
+    for (const p of providers) {
+      try {
+        return p.chatStream(model, messages, opts);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr;
+  }
+
+  async connect(apiKey) {
+    await this._default.connect(apiKey);
+    for (const e of this._adapters.values()) {
+      if (e && e.__multiProtocol) {
+        for (const p of e.providers) await p.connect(apiKey).catch(() => {});
+      } else {
+        await e.connect(apiKey).catch(() => {});
+      }
+    }
+    this.connected = true;
+  }
+
+  async disconnect() {
+    await this._default.disconnect();
+    for (const e of this._adapters.values()) {
+      if (e && e.__multiProtocol) {
+        for (const p of e.providers) await p.disconnect().catch(() => {});
+      } else {
+        await e.disconnect().catch(() => {});
+      }
+    }
+    this.connected = false;
+  }
+
+  fetchModels() { return this._default.fetchModels(); }
+  getModels() { return this._default.getModels(); }
+  setModel(m) { return this._default.setModel?.(m); }
+  getModel() { return this._default.getModel?.(); }
+}
+
 class ProviderRegistry {
   constructor() {
     this.providers = new Map();
     this.models = new Map();
-    this._modelTimestamps = new Map();    // providerId -> last fetch timestamp
-    this._modelCacheTtl = 60000;          // 60s
+    this._modelTimestamps = new Map();
+    this._modelCacheTtl = 60000;
     this.presets = PRESET_PROVIDERS;
+    this._ocConfig = loadOpenChatConfig();
   }
 
-  /**
-   * 获取或创建 Provider
-   */
+  _ocApiKey(providerId) {
+    const oc = this._ocConfig;
+    const cfg = oc?.providers?.[providerId];
+    return cfg?.options?.apiKey || cfg?.apiKey || null;
+  }
+
+  _buildAdapterProviders(providerId, preset, apiKey) {
+    const oc = this._ocConfig;
+    const providerCfg = oc?.providers?.[providerId];
+    const adapters = providerCfg?.adapter;
+    if (!adapters || typeof adapters !== 'object' || Array.isArray(adapters)) return null;
+
+    const adapterProviders = new Map();
+    for (const [model, protocolMap] of Object.entries(adapters)) {
+      if (!protocolMap || typeof protocolMap !== 'object' || Array.isArray(protocolMap)) continue;
+      // 协议作 key，遍历每个协议端点
+      const perProtocol = [];
+      for (const [protocol, cfg] of Object.entries(protocolMap)) {
+        if (!cfg || typeof cfg !== 'object') continue;
+        const baseURL = cfg.baseURL || cfg.baseUrl;
+        let p;
+        if (protocol === 'anthropic') {
+          p = createAnthropicProvider(apiKey, {
+            id: `${providerId}:anthropic`,
+            name: `${providerId} (anthropic)`,
+            baseUrl: baseURL || 'https://api.anthropic.com',
+            defaultModel: model,
+          });
+        } else if (protocol === 'openai' || protocol === 'openai-compatible') {
+          p = createProvider(providerId, apiKey, { baseURL });
+        } else {
+          p = createProvider(providerId, apiKey, { baseURL });
+        }
+        // 同步标记 connected：chat() 是同步检查该标志的，
+        // 真实连通性验证由后台 connect() 完成（失败也不影响 chat 同步标记）。
+        if (apiKey) p.connected = true;
+        p.connect(apiKey).catch(() => {});
+        perProtocol.push({ protocol, provider: p });
+      }
+      if (perProtocol.length === 1) {
+        adapterProviders.set(model, perProtocol[0].provider);
+      } else if (perProtocol.length > 1) {
+        const strategy = protocolMap.strategy || 'failover';
+        adapterProviders.set(model, {
+          __multiProtocol: true,
+          strategy,
+          providers: perProtocol.map(x => x.provider),
+        });
+      }
+    }
+    return adapterProviders;
+  }
+
   getProvider(providerId) {
-    // 已存在
     if (this.providers.has(providerId)) {
       return this.providers.get(providerId);
     }
 
-    // 从预设创建
     const preset = this.presets[providerId];
-    if (preset) {
-      // 注意: getProvider 保持同步，resolver 兜底仅在 chat() 内（async）做
-      const apiKey = persistentConfig.getApiKey(providerId);
+    if (!preset) return null;
 
-      // 特殊处理: Anthropic 使用专用适配器
-      if (providerId === 'anthropic' || preset.special) {
-        const provider = this.createSpecialProvider(providerId, apiKey, preset);
-        if (provider) {
-          this.providers.set(providerId, provider);
-          return provider;
-        }
-      }
+    // Try OpenChat config first, then persistentConfig
+    const apiKey = this._ocApiKey(providerId) || persistentConfig.getApiKey(providerId);
+    const adapterProviders = this._buildAdapterProviders(providerId, preset, apiKey);
 
-      // 默认使用 OpenAI 兼容适配器
-      const provider = createProvider(providerId, apiKey);
-      this.providers.set(providerId, provider);
-      return provider;
+    if (adapterProviders && adapterProviders.size > 0) {
+      const defaultProvider = createProvider(providerId, apiKey);
+      if (apiKey) defaultProvider.connected = true;
+      defaultProvider.connect(apiKey).catch(() => {});
+      const router = new RouterProvider(providerId, defaultProvider, adapterProviders);
+      this.providers.set(providerId, router);
+      return router;
     }
 
-    return null;
+    if (providerId === 'anthropic' || preset.special) {
+      const provider = this.createSpecialProvider(providerId, apiKey, preset);
+      if (provider) {
+        if (apiKey) provider.connected = true;
+        provider.connect(apiKey).catch(() => {});
+        this.providers.set(providerId, provider);
+        return provider;
+      }
+    }
+
+    const provider = createProvider(providerId, apiKey);
+    if (apiKey) provider.connected = true;
+    provider.connect(apiKey).catch(() => {});
+    this.providers.set(providerId, provider);
+    return provider;
   }
 
   /**
@@ -97,8 +292,8 @@ class ProviderRegistry {
       persistentConfig.setApiKey(providerId, apiKey);
     }
 
-    // 创建或更新 provider
-    let provider = this.providers.get(providerId);
+    // 使用 getProvider 创建（含 adapter 路由支持）
+    let provider = this.getProvider(providerId);
 
     if (!provider) {
       provider = createProvider(providerId, apiKey || persistentConfig.getApiKey(providerId), {
@@ -318,6 +513,21 @@ class ProviderRegistry {
       presetsAvailable: Object.keys(this.presets).length,
       totalModels
     };
+  }
+
+  /**
+   * 释放所有资源：断开所有 provider 连接，清空缓存
+   * 用于 HMR / 测试 cleanup / 进程退出
+   */
+  async dispose() {
+    for (const provider of this.providers.values()) {
+      try {
+        await provider.disconnect?.();
+      } catch {}
+    }
+    this.providers.clear();
+    this.models.clear();
+    this._modelTimestamps.clear();
   }
 }
 
