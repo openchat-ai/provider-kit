@@ -101,12 +101,18 @@ export class OpenAICompatibleProvider {
       ...this.headers
     };
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: this.timeout ? AbortSignal.timeout(this.timeout) : undefined
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: this.timeout ? AbortSignal.timeout(this.timeout) : undefined
+      });
+    } catch (e) {
+      const detail = [e.message, e.cause?.message, e.code].filter(Boolean).join(' | ');
+      throw new Error(`${this.name} fetch failed: ${url} — ${detail}`);
+    }
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
@@ -387,8 +393,10 @@ export class OpenAICompatibleProvider {
     });
 
     if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(error.error?.message || `Embedding API error: ${response.status}`);
+      const raw = await response.text().catch(() => '');
+      let error;
+      try { error = JSON.parse(raw); } catch { error = { raw_body: raw.substring(0, 500) }; }
+      throw new Error(error.error?.message || error.raw_body || `${this.name} API error: ${response.status}`);
     }
 
     const data = await response.json();

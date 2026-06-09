@@ -89,7 +89,7 @@ function normalizeSpace(s) {
   let o = '';
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
-    if (c === '\n' || c === '\t' || c === '\r') { o += ' '; } else { o += c; }
+    if (c === '\t' || c === '\r') { o += ' '; } else { o += c; }
   }
   return o.trim();
 }
